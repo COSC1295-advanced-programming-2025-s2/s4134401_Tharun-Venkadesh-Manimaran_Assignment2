@@ -1,0 +1,33 @@
+--- Doctor coverage (minutes per day) ---
+ MONDAY : 0 min ⚠️ <60
+ TUESDAY : 0 min ⚠️ <60
+ WEDNESDAY : 0 min ⚠️ <60
+ THURSDAY : 0 min ⚠️ <60
+ FRIDAY : 0 min ⚠️ <60
+ SATURDAY : 0 min ⚠️ <60
+ SUNDAY : 0 min ⚠️ <60
+
+--- Nurse roster (week) ---
+== MONDAY ==
+ (no nurse on roster)
+
+== TUESDAY ==
+ (no nurse on roster)
+
+== WEDNESDAY ==
+ (no nurse on roster)
+
+== THURSDAY ==
+ (no nurse on roster)
+
+== FRIDAY ==
+ (no nurse on roster)
+
+== SATURDAY ==
+ (no nurse on roster)
+
+== SUNDAY ==
+ (no nurse on roster)
+
+--- Nurse roster (per person, whole week) ---
+(no nurses added)
