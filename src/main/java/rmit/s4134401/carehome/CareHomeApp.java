@@ -9,23 +9,27 @@ import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.input.KeyCombination;
 import javafx.scene.layout.*;
-import javafx.scene.paint.Color;
 import javafx.scene.text.Text;
 import javafx.stage.Stage;
 
 import java.time.DayOfWeek;
 import java.time.LocalTime;
-import java.util.Optional;
+
+import rmit.s4134401.carehome.service.CareHomeService;
+import rmit.s4134401.carehome.repo.jdbc.*;
 
 public class CareHomeApp extends Application {
 
+    private CareHomeService svc;
     private CareHome app = new CareHome();
+
     private final TilePane bedGrid = new TilePane();
     private final Text status = new Text("Ready");
 
     @Override
     public void start(Stage stage) {
-        app.addManager("m1","Manager One");
+        rmit.s4134401.carehome.util.DB.init("carehome.db"); 
+        rmit.s4134401.carehome.util.SchemaMigrator.ensure();
 
         BorderPane root = new BorderPane();
         root.setTop(buildMenuBar(stage));
@@ -37,7 +41,106 @@ public class CareHomeApp extends Application {
         stage.setScene(scene);
         stage.show();
 
+        svc = new CareHomeService(
+                new JdbcStaffRepository(),
+                new JdbcBedRepository(),
+                new JdbcPatientRepository(),
+                new JdbcNurseRosterRepository(),
+                new JdbcDoctorMinutesRepository(),
+                new JdbcAuditRepository(),
+                new JdbcPrescriptionRepository(),
+                new JdbcAdministrationRepository()
+        );
+
+        try { svc.addManager("m1", "Manager One"); } catch (RuntimeException ignore) {}
+
         refreshBeds();
+    }
+    
+    private void showRosterDashboard(){
+        TabPane tabs = new TabPane();
+
+        TextArea team = new TextArea(app.teamRosterSummary());
+        team.setEditable(false); team.setWrapText(true);
+        team.setPrefSize(820, 520);
+        Tab t1 = new Tab("Team (Week)", new ScrollPane(team));
+        t1.setClosable(false);
+
+        TextArea byDay = new TextArea(app.nurseWeeklyRosterSummary());
+        byDay.setEditable(false); byDay.setWrapText(true);
+        Tab t2 = new Tab("Nurses by Day", new ScrollPane(byDay));
+        t2.setClosable(false);
+
+        TextArea byPerson = new TextArea(app.allNursesRosterByPerson());
+        byPerson.setEditable(false); byPerson.setWrapText(true);
+        Tab t3 = new Tab("Nurses by Person", new ScrollPane(byPerson));
+        t3.setClosable(false);
+
+        TextArea docs = new TextArea(app.doctorMinutesSummary());
+        docs.setEditable(false); docs.setWrapText(true);
+        Tab t4 = new Tab("Doctor Coverage", new ScrollPane(docs));
+        t4.setClosable(false);
+
+        tabs.getTabs().addAll(t1, t2, t3, t4);
+
+        Dialog<Void> d = new Dialog<>();
+        d.setTitle("Roster Dashboard");
+        d.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        d.getDialogPane().setContent(tabs);
+        d.setResizable(true);
+        d.getDialogPane().setPrefSize(880, 600);
+        d.showAndWait();
+
+        setStatus("Roster Dashboard viewed");
+    }
+
+    
+    private static final class BedCell {
+        final int id;              
+        final String ward;
+        final int room;
+        final int bedNum;
+        final String patientId;    
+        final Gender gender;       
+        final boolean isolation;   
+
+        BedCell(int id, String ward, int room, int bedNum,
+                String patientId, Gender gender, boolean isolation){
+            this.id = id; this.ward = ward; this.room = room; this.bedNum = bedNum;
+            this.patientId = patientId; this.gender = gender; this.isolation = isolation;
+        }
+        boolean isVacant(){ return patientId == null; }
+        String cellLabel(){
+            String base = ward + "-R" + room + "-B" + bedNum;
+            return isVacant() ? base + "\n[vacant]" : base + "\n" + patientId;
+        }
+    }
+
+    private java.util.List<BedCell> loadBedCellsFromDB() {
+        java.util.List<BedCell> out = new java.util.ArrayList<>();
+        String sql =
+            "SELECT b.id, b.ward, b.room, b.bed_num, p.id AS pid, p.gender, p.isolation " +
+            "FROM beds b " +
+            "LEFT JOIN patients p ON p.bed_id = b.id " +
+            "ORDER BY b.ward, b.room, b.bed_num";
+        try (java.sql.Connection c = rmit.s4134401.carehome.util.DB.get();
+             java.sql.Statement st = c.createStatement();
+             java.sql.ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) {
+                int id = rs.getInt("id");
+                String ward = rs.getString("ward");
+                int room = rs.getInt("room");
+                int bedNum = rs.getInt("bed_num");
+                String pid = rs.getString("pid"); 
+                String gstr = rs.getString("gender");
+                Gender g = (pid == null || gstr == null) ? null : Gender.valueOf(gstr.toUpperCase());
+                boolean iso = (pid != null) && rs.getInt("isolation") == 1;
+                out.add(new BedCell(id, ward, room, bedNum, pid, g, iso));
+            }
+        } catch (Exception e){
+            showError("DB Error", e.getMessage());
+        }
+        return out;
     }
 
     private MenuBar buildMenuBar(Stage stage){
@@ -54,9 +157,7 @@ public class CareHomeApp extends Application {
                 this.app = loaded;
                 setStatus("Loaded carehome.bin");
                 refreshBeds();
-            } catch (RuntimeException ex) {
-                showError("Load failed", ex.getMessage());
-            }
+            } catch (RuntimeException ex) { showError("Load failed", ex.getMessage()); }
         });
         MenuItem exit = new MenuItem("Exit");
         exit.setAccelerator(KeyCombination.keyCombination("Ctrl+Q"));
@@ -108,9 +209,13 @@ public class CareHomeApp extends Application {
             });
         });
 
+        MenuItem showStaff = new MenuItem("Show Staff…");
+        showStaff.setOnAction(e -> showStaffList());
+
         staff.getItems().addAll(
                 addDoc, addNurse, new SeparatorMenuItem(), setDocMins,
-                new SeparatorMenuItem(), listStaff, showRoster, staffAudit
+                new SeparatorMenuItem(), listStaff, showRoster, staffAudit,
+                new SeparatorMenuItem(), showStaff
         );
 
         Menu schedule = new Menu("Schedule");
@@ -120,10 +225,9 @@ public class CareHomeApp extends Application {
         removeShift.setOnAction(e -> promptRemoveShift());
         MenuItem checkCompliance = new MenuItem("Check Compliance");
         checkCompliance.setOnAction(e -> {
-            try { app.checkCompliance(); info("Compliance", "All good ✅"); setStatus("Compliance OK"); }
+            try { svc.checkCompliance(); info("Compliance", "All good"); setStatus("Compliance OK"); }
             catch (Exception ex){ showError("Compliance failure", ex.getMessage()); }
         });
-
         MenuItem nurseWeek = new MenuItem("Nurse Roster — Whole Week");
         nurseWeek.setOnAction(e -> {
             String txt = app.nurseWeeklyRosterSummary();
@@ -142,10 +246,8 @@ public class CareHomeApp extends Application {
             showLongInfo("Team Roster — Week", txt);
             setStatus("Team roster (week) shown");
         });
-
         MenuItem rosterDashboard = new MenuItem("Roster Dashboard…");
         rosterDashboard.setOnAction(e -> showRosterDashboard());
-
         MenuItem exportRoster = new MenuItem("Export Week to roster_week.txt");
         exportRoster.setOnAction(e -> {
             try {
@@ -154,11 +256,8 @@ public class CareHomeApp extends Application {
                         text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
                 info("Export", "Saved roster_week.txt in the app folder.");
                 setStatus("Exported roster_week.txt");
-            } catch (Exception ex) {
-                showError("Export failed", ex.getMessage());
-            }
+            } catch (Exception ex) { showError("Export failed", ex.getMessage()); }
         });
-
         schedule.getItems().setAll(
                 assignShift, removeShift, new SeparatorMenuItem(),
                 nurseWeek, doctorWeek, teamWeek, rosterDashboard, exportRoster,
@@ -166,18 +265,11 @@ public class CareHomeApp extends Application {
         );
 
         Menu patients = new Menu("Patients");
-        MenuItem admit = new MenuItem("Admit…");
-        admit.setOnAction(e -> promptAdmitPatient());
-        MenuItem move = new MenuItem("Move…");
-        move.setOnAction(e -> promptMovePatient());
-
-        MenuItem details = new MenuItem("Resident Details…");
-        details.setOnAction(e -> promptResidentDetails());
-        MenuItem addRx = new MenuItem("Add Prescription…");
-        addRx.setOnAction(e -> promptAddPrescription());
-        MenuItem adminMed = new MenuItem("Administer Medication…");
-        adminMed.setOnAction(e -> promptAdministerMedication());
-
+        MenuItem admit = new MenuItem("Admit…"); admit.setOnAction(e -> promptAdmitPatient());
+        MenuItem move = new MenuItem("Move…");  move.setOnAction(e -> promptMovePatient());
+        MenuItem details = new MenuItem("Resident Details…"); details.setOnAction(e -> promptResidentDetails());
+        MenuItem addRx = new MenuItem("Add Prescription…"); addRx.setOnAction(e -> promptAddPrescription());
+        MenuItem adminMed = new MenuItem("Administer Medication…"); adminMed.setOnAction(e -> promptAdministerMedication());
         patients.getItems().addAll(admit, move, new SeparatorMenuItem(), details, addRx, adminMed);
 
         Menu audit = new Menu("Audit");
@@ -187,6 +279,109 @@ public class CareHomeApp extends Application {
 
         return new MenuBar(file, staff, schedule, patients, audit);
     }
+    
+    
+    
+    private void promptAdmitPatient(){
+        Dialog<Boolean> d = new Dialog<>();
+        d.setTitle("Admit Patient");
+        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+
+        TextField managerId = new TextField("m1");
+        TextField pid = new TextField();
+        TextField name = new TextField();
+        ComboBox<Gender> gender = new ComboBox<>();
+        gender.getItems().addAll(Gender.values());
+        gender.getSelectionModel().select(Gender.F);
+        CheckBox iso = new CheckBox("Requires isolation");
+
+        ComboBox<String> ward = new ComboBox<>();
+        ward.getItems().addAll("A","B"); ward.getSelectionModel().select("A");
+        Spinner<Integer> room = new Spinner<>(1, 6, 1);
+        Spinner<Integer> bed  = new Spinner<>(1, 4, 1);
+
+        GridPane gp = formGrid(
+                new Label("Manager ID (auth):"), managerId,
+                new Label("Patient ID:"), pid,
+                new Label("Full name:"), name,
+                new Label("Gender:"), gender,
+                new Label("Isolation:"), iso,
+                new Label("Ward:"), ward,
+                new Label("Room (1-6):"), room,
+                new Label("Bed (1-4):"), bed
+        );
+        d.getDialogPane().setContent(gp);
+        d.setResultConverter(btn -> btn==ButtonType.OK);
+        d.showAndWait().ifPresent(ok -> {
+            if (!ok) return;
+            try {
+                svc.admitPatient(
+                        managerId.getText().trim(),
+                        pid.getText().trim(),
+                        name.getText().trim(),
+                        gender.getValue(),
+                        iso.isSelected(),
+                        ward.getValue(),
+                        room.getValue(),
+                        bed.getValue()
+                );
+                setStatus("Admitted " + pid.getText().trim() + " to " + ward.getValue() + "-R" + room.getValue() + "-B" + bed.getValue());
+                refreshBeds();
+            } catch (Exception ex){ showError("Admit failed", ex.getMessage()); }
+        });
+    }
+
+    private void promptMovePatient(){
+        Dialog<Boolean> d = new Dialog<>();
+        d.setTitle("Move Patient");
+        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+
+        TextField nurseId = new TextField();
+        ComboBox<DayOfWeek> day = new ComboBox<>();
+        day.getItems().addAll(DayOfWeek.values());
+        day.getSelectionModel().select(DayOfWeek.MONDAY);
+        Spinner<Integer> hour = new Spinner<>(0, 23, 10);
+
+        ComboBox<String> fromWard = new ComboBox<>(); fromWard.getItems().addAll("A","B"); fromWard.getSelectionModel().select("A");
+        Spinner<Integer> fromRoom = new Spinner<>(1, 6, 1);
+        Spinner<Integer> fromBed  = new Spinner<>(1, 4, 1);
+
+        ComboBox<String> toWard = new ComboBox<>(); toWard.getItems().addAll("A","B"); toWard.getSelectionModel().select("A");
+        Spinner<Integer> toRoom = new Spinner<>(1, 6, 1);
+        Spinner<Integer> toBed  = new Spinner<>(1, 4, 1);
+
+        GridPane gp = formGrid(
+                new Label("Nurse ID (auth):"), nurseId,
+                new Label("Day:"), day,
+                new Label("Hour:"), hour,
+                new Label("From Ward:"), fromWard,
+                new Label("From Room:"), fromRoom,
+                new Label("From Bed:"), fromBed,
+                new Label("To Ward:"), toWard,
+                new Label("To Room:"), toRoom,
+                new Label("To Bed:"), toBed
+        );
+        d.getDialogPane().setContent(gp);
+        d.setResultConverter(btn -> btn==ButtonType.OK);
+        d.showAndWait().ifPresent(ok -> {
+            if (!ok) return;
+            try {
+                svc.movePatient(
+                        nurseId.getText().trim(),
+                        day.getValue(),
+                        java.time.LocalTime.of(hour.getValue(), 0),
+                        fromWard.getValue(), fromRoom.getValue(), fromBed.getValue(),
+                        toWard.getValue(), toRoom.getValue(), toBed.getValue()
+                );
+                setStatus("Moved patient from " +
+                        fromWard.getValue()+"-R"+fromRoom.getValue()+"-B"+fromBed.getValue() +
+                        " to " +
+                        toWard.getValue()+"-R"+toRoom.getValue()+"-B"+toBed.getValue());
+                refreshBeds();
+            } catch (Exception ex){ showError("Move failed", ex.getMessage()); }
+        });
+    }
+
 
     private void showLongInfo(String title, String msg){
         TextArea ta = new TextArea(msg);
@@ -201,43 +396,56 @@ public class CareHomeApp extends Application {
     }
 
     private void promptResidentDetails(){
-    	if (!ensureBedsAvailable("This action")) return;
-        Dialog<Integer> d = new Dialog<Integer>();
+        Dialog<Boolean> d = new Dialog<>();
         d.setTitle("Resident Details");
         d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        Spinner<Integer> bedIdx = new Spinner<Integer>(0, Math.max(0, app.beds.size()-1), 0);
-        GridPane gp = formGrid(new Label("Bed index:"), bedIdx);
+        ComboBox<String> ward = new ComboBox<>(); ward.getItems().addAll("A","B"); ward.getSelectionModel().select("A");
+        Spinner<Integer> room = new Spinner<>(1, 6, 1);
+        Spinner<Integer> bed  = new Spinner<>(1, 4, 1);
+        GridPane gp = formGrid(new Label("Ward:"), ward, new Label("Room (1-6):"), room, new Label("Bed (1-4):"), bed);
         d.getDialogPane().setContent(gp);
-        d.setResultConverter(btn -> btn==ButtonType.OK ? bedIdx.getValue() : null);
-        d.showAndWait().ifPresent(idx -> {
-            try{
-                Bed b = app.beds.get(idx);
-                if (b.isVacant()){ info("Resident Details", "Bed is vacant."); return; }
-                Patient p = b.getOccupant();
-                String msg = p.toString()
-                        + "\n\nPrescriptions:\n" + app.prescriptionsSummary(p.id())
-                        + "\n\nAdministrations:\n" + app.administrationsSummary(p.id());
-                info("Resident Details", msg);
+        d.setResultConverter(btn -> btn==ButtonType.OK);
+        d.showAndWait().ifPresent(ok -> {
+            if (!ok) return;
+            try {
+                String pid = svc.patientIdInBed(ward.getValue(), room.getValue(), bed.getValue());
+                if (pid == null){ info("Resident Details", "Bed is vacant."); return; }
+
+                java.util.List<Prescription> rxs = svc.loadPrescriptionsForPatient(pid);
+                java.util.List<MedicationAdministration> admins = svc.administrationsForPatient(pid);
+
+                String rxText = rxs.isEmpty() ? "(no prescriptions)" :
+                        rxs.stream().map(Prescription::toString).reduce((a,b)->a+"\n"+b).get();
+                String adText = admins.isEmpty() ? "(no administrations)" :
+                        admins.stream().map(Object::toString).reduce((a,b)->a+"\n"+b).get();
+
+                String msg = "Patient ID: " + pid + "\n"
+                           + ward.getValue()+"-R"+room.getValue()+"-B"+bed.getValue() + "\n\n"
+                           + "Prescriptions:\n" + rxText + "\n\n"
+                           + "Administrations:\n" + adText;
+                showLongInfo("Resident Details", msg);
             } catch (Exception ex){ showError("Resident Details", ex.getMessage()); }
         });
     }
 
     private void promptAddPrescription(){
-    	if (!ensureBedsAvailable("This action")) return;
-        Dialog<Boolean> d = new Dialog<Boolean>();
+        Dialog<Boolean> d = new Dialog<>();
         d.setTitle("Add Prescription");
         d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
         TextField doctorId = new TextField();
-        ComboBox<DayOfWeek> day = new ComboBox<DayOfWeek>();
-        day.getItems().addAll(DayOfWeek.values()); day.getSelectionModel().select(DayOfWeek.MONDAY);
-        Spinner<Integer> bedIndex = new Spinner<Integer>(0, Math.max(0, app.beds.size()-1), 0);
+        ComboBox<DayOfWeek> day = new ComboBox<>(); day.getItems().addAll(DayOfWeek.values()); day.getSelectionModel().select(DayOfWeek.MONDAY);
+        ComboBox<String> ward = new ComboBox<>(); ward.getItems().addAll("A","B"); ward.getSelectionModel().select("A");
+        Spinner<Integer> room = new Spinner<>(1, 6, 1);
+        Spinner<Integer> bed  = new Spinner<>(1, 4, 1);
         TextField med = new TextField();
         TextField dose = new TextField();
         TextField times = new TextField("08:00, 14:00");
         GridPane gp = formGrid(
                 new Label("Doctor ID (auth):"), doctorId,
                 new Label("Day:"), day,
-                new Label("Bed index (occupied):"), bedIndex,
+                new Label("Ward:"), ward,
+                new Label("Room (1-6):"), room,
+                new Label("Bed (1-4):"), bed,
                 new Label("Medicine:"), med,
                 new Label("Dose:"), dose,
                 new Label("Times:"), times
@@ -246,35 +454,38 @@ public class CareHomeApp extends Application {
         d.setResultConverter(btn -> btn==ButtonType.OK);
         d.showAndWait().ifPresent(ok -> {
             if (!ok) return;
-            try{
-                Bed b = app.beds.get(bedIndex.getValue());
-                if (b.isVacant()) { showError("Add Prescription", "Chosen bed is vacant"); return; }
-                Patient p = b.getOccupant();
-                Prescription rx = new Prescription(p.id());
-                rx.addLine(med.getText().trim(), dose.getText().trim(), times.getText().trim());
-                app.doctorAddPrescription(doctorId.getText().trim(), b, day.getValue(), rx);
-                setStatus("RX added for " + p.id());
+            try {
+                String pid = svc.patientIdInBed(ward.getValue(), room.getValue(), bed.getValue());
+                if (pid == null) { showError("Add Prescription", "Chosen bed is vacant"); return; }
+                if (!doctorExists(doctorId.getText())) { showError("Add Prescription", "Doctor '"+doctorId.getText()+"' does not exist."); return; }
+                svc.doctorAddPrescription(
+                        doctorId.getText().trim(), pid, day.getValue(),
+                        med.getText().trim(), dose.getText().trim(), times.getText().trim()
+                );
+                setStatus("RX added for " + pid);
             } catch (Exception ex){ showError("Add Prescription", ex.getMessage()); }
         });
     }
 
     private void promptAdministerMedication(){
-    	if (!ensureBedsAvailable("This action")) return;
-        Dialog<Boolean> d = new Dialog<Boolean>();
+        Dialog<Boolean> d = new Dialog<>();
         d.setTitle("Administer Medication");
         d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
         TextField nurseId = new TextField();
-        ComboBox<DayOfWeek> day = new ComboBox<DayOfWeek>();
-        day.getItems().addAll(DayOfWeek.values()); day.getSelectionModel().select(DayOfWeek.MONDAY);
-        Spinner<Integer> hour = new Spinner<Integer>(0,23,10);
-        Spinner<Integer> bedIndex = new Spinner<Integer>(0, Math.max(0, app.beds.size()-1), 0);
+        ComboBox<DayOfWeek> day = new ComboBox<>(); day.getItems().addAll(DayOfWeek.values()); day.getSelectionModel().select(DayOfWeek.MONDAY);
+        Spinner<Integer> hour = new Spinner<>(0,23,10);
+        ComboBox<String> ward = new ComboBox<>(); ward.getItems().addAll("A","B"); ward.getSelectionModel().select("A");
+        Spinner<Integer> room = new Spinner<>(1, 6, 1);
+        Spinner<Integer> bed  = new Spinner<>(1, 4, 1);
         TextField med = new TextField();
         TextField dose = new TextField();
         GridPane gp = formGrid(
                 new Label("Nurse ID (auth):"), nurseId,
                 new Label("Day:"), day,
                 new Label("Hour:"), hour,
-                new Label("Bed index (occupied):"), bedIndex,
+                new Label("Ward:"), ward,
+                new Label("Room (1-6):"), room,
+                new Label("Bed (1-4):"), bed,
                 new Label("Medicine:"), med,
                 new Label("Dose:"), dose
         );
@@ -282,17 +493,96 @@ public class CareHomeApp extends Application {
         d.setResultConverter(btn -> btn==ButtonType.OK);
         d.showAndWait().ifPresent(ok -> {
             if (!ok) return;
-            try{
-                Bed b = app.beds.get(bedIndex.getValue());
-                if (b.isVacant()) { showError("Administer", "Chosen bed is vacant"); return; }
-                app.administerMedication(
-                        nurseId.getText().trim(), b, day.getValue(),
-                        java.time.LocalTime.of(hour.getValue(),0),
-                        med.getText().trim(), dose.getText().trim()
+            try {
+                String pid = svc.patientIdInBed(ward.getValue(), room.getValue(), bed.getValue());
+                if (pid == null) { showError("Administer", "Chosen bed is vacant"); return; }
+                if (!nurseExists(nurseId.getText())) { showError("Administer Medication", "Nurse '"+nurseId.getText()+"' does not exist."); return; }
+                svc.administerMedication(
+                        nurseId.getText().trim(), day.getValue(), LocalTime.of(hour.getValue(), 0),
+                        pid, med.getText().trim(), dose.getText().trim()
                 );
                 setStatus("Medication administered");
                 refreshBeds();
             } catch (Exception ex){ showError("Administer Medication", ex.getMessage()); }
+        });
+    }
+
+    private void promptAddStaff(Role role){
+        Dialog<Triple<String,String,String>> d = new Dialog<>();
+        d.setTitle("Add " + role);
+        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        TextField managerId = new TextField("m1");
+        TextField id = new TextField();
+        TextField name = new TextField();
+        GridPane gp = formGrid(
+                new Label("Manager ID (auth):"), managerId,
+                new Label(role == Role.DOCTOR ? "Doctor ID:" : "Nurse ID:"), id,
+                new Label("Name:"), name);
+        d.getDialogPane().setContent(gp);
+        d.setResultConverter(btn -> btn==ButtonType.OK ? new Triple<>(managerId.getText(), id.getText(), name.getText()) : null);
+        d.showAndWait().ifPresent(t -> {
+            try {
+                if (role==Role.DOCTOR) svc.addDoctor(t.b, t.c);
+                else svc.addNurse(t.b, t.c);
+                setStatus(role + " added: " + t.b);
+            } catch (Exception ex){ showError("Add " + role + " failed", ex.getMessage()); }
+        });
+    }
+
+    private void promptSetDoctorMinutes(){
+        Dialog<Triple<String,DayOfWeek,Integer>> d = new Dialog<>();
+        d.setTitle("Set Doctor Minutes");
+        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        TextField managerId = new TextField("m1");
+        ComboBox<DayOfWeek> day = new ComboBox<>(); day.getItems().addAll(DayOfWeek.values()); day.getSelectionModel().select(DayOfWeek.MONDAY);
+        TextField mins = new TextField("60");
+        GridPane gp = formGrid(new Label("Manager ID (auth):"), managerId, new Label("Day:"), day, new Label("Minutes (≥60):"), mins);
+        d.getDialogPane().setContent(gp);
+        d.setResultConverter(btn -> {
+            if (btn!=ButtonType.OK) return null;
+            try { return new Triple<>(managerId.getText(), day.getValue(), Integer.parseInt(mins.getText().trim())); }
+            catch (NumberFormatException nfe){ showError("Invalid minutes", "Please enter a number"); return null; }
+        });
+        d.showAndWait().ifPresent(t -> {
+            try { svc.setDoctorMinutes(t.a, t.b, t.c); setStatus("Doctor minutes set for " + t.b + " = " + t.c); }
+            catch (Exception ex){ showError("Set minutes failed", ex.getMessage()); }
+        });
+    }
+
+    private void promptAssignShift(){
+        Dialog<Quad<String,String,DayOfWeek,Boolean>> d = new Dialog<>();
+        d.setTitle("Assign Nurse Shift");
+        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        TextField managerId = new TextField("m1");
+        TextField nurseId = new TextField();
+        ComboBox<DayOfWeek> day = new ComboBox<>(); day.getItems().addAll(DayOfWeek.values()); day.getSelectionModel().select(DayOfWeek.MONDAY);
+        ComboBox<String> shift = new ComboBox<>(); shift.getItems().addAll("A (08-16)", "B (14-22)"); shift.getSelectionModel().select(0);
+        GridPane gp = formGrid(new Label("Manager ID (auth):"), managerId, new Label("Nurse ID:"), nurseId, new Label("Day:"), day, new Label("Shift:"), shift);
+        d.getDialogPane().setContent(gp);
+        d.setResultConverter(btn -> btn==ButtonType.OK ? new Quad<>(managerId.getText(), nurseId.getText(), day.getValue(), shift.getSelectionModel().getSelectedIndex()==0) : null);
+        d.showAndWait().ifPresent(t -> {
+            try {
+                if (!nurseExists(t.b)) { showError("Assign shift failed", "Nurse '"+t.b+"' does not exist."); return; }
+                svc.assignNurseShift(t.a, t.b, t.c, t.d);
+                setStatus("Shift assigned");
+            } catch (Exception ex){ showError("Assign shift failed", ex.getMessage()); }
+        });
+    }
+
+    private void promptRemoveShift(){
+        Dialog<Quad<String,String,DayOfWeek,Boolean>> d = new Dialog<>();
+        d.setTitle("Remove Nurse Shift");
+        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        TextField managerId = new TextField("m1");
+        TextField nurseId = new TextField();
+        ComboBox<DayOfWeek> day = new ComboBox<>(); day.getItems().addAll(DayOfWeek.values()); day.getSelectionModel().select(DayOfWeek.MONDAY);
+        ComboBox<String> shift = new ComboBox<>(); shift.getItems().addAll("A (08-16)", "B (14-22)"); shift.getSelectionModel().select(0);
+        GridPane gp = formGrid(new Label("Manager ID (auth):"), managerId, new Label("Nurse ID:"), nurseId, new Label("Day:"), day, new Label("Shift:"), shift);
+        d.getDialogPane().setContent(gp);
+        d.setResultConverter(btn -> btn==ButtonType.OK ? new Quad<>(managerId.getText(), nurseId.getText(), day.getValue(), shift.getSelectionModel().getSelectedIndex()==0) : null);
+        d.showAndWait().ifPresent(t -> {
+            try { svc.removeNurseShift(t.a, t.b, t.c, t.d); setStatus("Shift removed"); }
+            catch (Exception ex){ showError("Remove shift failed", ex.getMessage()); }
         });
     }
 
@@ -317,239 +607,77 @@ public class CareHomeApp extends Application {
 
     private void refreshBeds(){
         bedGrid.getChildren().clear();
-        for (int i = 0; i < app.beds.size(); i++){
-            Bed b = app.beds.get(i);
-            Button btn = new Button(cellLabel(b));
+        java.util.List<BedCell> cells = loadBedCellsFromDB();
+        for (int i = 0; i < cells.size(); i++){
+            final BedCell bc = cells.get(i);
+            Button btn = new Button(bc.cellLabel());
             btn.setPrefSize(120, 56);
-            styleBedButton(btn, b);
-            final Bed bedRef = b;
-            btn.setOnAction(e -> onBedClicked(bedRef));
+            styleBedButtonDB(btn, bc);
+            btn.setOnAction(e -> onBedClickedDB(bc));
             bedGrid.getChildren().add(btn);
         }
-        setStatus("Beds: " + app.beds.size());
+        setStatus("Beds: " + cells.size());
+    }
+    
+    private boolean nurseExists(String id){
+        String sql = "SELECT 1 FROM staff WHERE id=? AND role='NURSE' LIMIT 1";
+        try (java.sql.Connection c = rmit.s4134401.carehome.util.DB.get();
+             java.sql.PreparedStatement ps = c.prepareStatement(sql)){
+            ps.setString(1, id.trim());
+            try (java.sql.ResultSet rs = ps.executeQuery()){ return rs.next(); }
+        } catch (Exception e){ showError("DB Error", e.getMessage()); return false; }
     }
 
-    private void onBedClicked(Bed b){
-        if (b.isVacant()) info("Bed", b.toString());
-        else info("Resident", b.getOccupant().toString());
+    private boolean doctorExists(String id){
+        String sql = "SELECT 1 FROM staff WHERE id=? AND role='DOCTOR' LIMIT 1";
+        try (java.sql.Connection c = rmit.s4134401.carehome.util.DB.get();
+             java.sql.PreparedStatement ps = c.prepareStatement(sql)){
+            ps.setString(1, id.trim());
+            try (java.sql.ResultSet rs = ps.executeQuery()){ return rs.next(); }
+        } catch (Exception e){ showError("DB Error", e.getMessage()); return false; }
     }
 
-    private String cellLabel(Bed b){
-        String base = b.ward() + "-R" + b.room() + "-B" + b.bedNum();
-        if (b.isVacant()) return base + "\n[vacant]";
-        return base + "\n" + b.getOccupant().id();
+    private java.util.List<String> loadStaffFromDB(){
+        java.util.List<String> rows = new java.util.ArrayList<>();
+        String sql = "SELECT id, name, role FROM staff ORDER BY role, id";
+        try (java.sql.Connection c = rmit.s4134401.carehome.util.DB.get();
+             java.sql.Statement st = c.createStatement();
+             java.sql.ResultSet rs = st.executeQuery(sql)){
+            while (rs.next()){
+                rows.add(String.format("%-6s  %-6s  %s",
+                        rs.getString("role"), rs.getString("id"), rs.getString("name")));
+            }
+        } catch (Exception e){ showError("DB Error", e.getMessage()); }
+        return rows;
     }
 
-    private void styleBedButton(Button btn, Bed b){
+    private void showStaffList(){
+        java.util.List<String> lines = loadStaffFromDB();
+        String body = lines.isEmpty() ? "(no staff)" : String.join("\n", lines);
+        showLongInfo("Staff (role  id  name)", body);
+    }
+
+
+    private void onBedClickedDB(BedCell b){
+        if (b.isVacant()) info("Bed", b.ward + "-R" + b.room + "-B" + b.bedNum + "\n[vacant]");
+        else info("Resident", b.patientId + " (" + b.gender + (b.isolation? ", isolation":"") + ")\n" +
+                            b.ward + "-R" + b.room + "-B" + b.bedNum);
+    }
+
+    private void styleBedButtonDB(Button btn, BedCell b){
         if (b.isVacant()){
             btn.setStyle("-fx-background-color: linear-gradient(#e9ffe9,#c6f3c6); -fx-border-color:#7ecb7e; -fx-border-radius:8; -fx-background-radius:8;");
             return;
         }
-        Patient p = b.getOccupant();
-        String baseColor = (p.gender()==Gender.M)
+        String baseColor = (b.gender==Gender.M)
                 ? "-fx-background-color: linear-gradient(#e6f0ff,#cfe0ff);"
                 : "-fx-background-color: linear-gradient(#ffe6f0,#ffd0df);";
-        String border = p.needsIsolation()
+        String border = b.isolation
                 ? "-fx-border-color: #f39c12; -fx-border-width:2;"
                 : "-fx-border-color: #b3b3b3;";
         btn.setStyle(baseColor + " -fx-background-radius:8; -fx-border-radius:8; " + border);
-        btn.setTextFill(Color.web("#222"));
+        btn.setTextFill(javafx.scene.paint.Color.web("#222"));
     }
-
-
-    private void promptAddStaff(Role role){
-        Dialog<Triple<String,String,String>> d = new Dialog<Triple<String,String,String>>();
-        d.setTitle("Add " + role);
-        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        TextField id = new TextField();
-        TextField name = new TextField();
-        TextField managerId = new TextField("m1");
-        GridPane gp = formGrid(
-                new Label("Manager ID (auth):"), managerId,
-                new Label(role == Role.DOCTOR ? "Doctor ID:" : "Nurse ID:"), id,
-                new Label("Name:"), name);
-        d.getDialogPane().setContent(gp);
-        d.setResultConverter(btn -> btn==ButtonType.OK ? new Triple<String,String,String>(managerId.getText(), id.getText(), name.getText()) : null);
-        Optional<Triple<String,String,String>> res = d.showAndWait();
-        if (res.isPresent()){
-            Triple<String,String,String> t = res.get();
-            try{
-                if (role==Role.DOCTOR) app.addDoctor(t.b, t.c);
-                else app.addNurse(t.b, t.c);
-                setStatus(role + " added: " + t.b);
-                refreshBeds();
-            } catch (Exception ex){ showError("Add " + role + " failed", ex.getMessage()); }
-        }
-    }
-
-    private void promptSetDoctorMinutes(){
-        Dialog<Triple<String,DayOfWeek,Integer>> d = new Dialog<Triple<String,DayOfWeek,Integer>>();
-        d.setTitle("Set Doctor Minutes");
-        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        TextField managerId = new TextField("m1");
-        ComboBox<DayOfWeek> day = new ComboBox<DayOfWeek>();
-        day.getItems().addAll(DayOfWeek.values());
-        day.getSelectionModel().select(DayOfWeek.MONDAY);
-        TextField mins = new TextField("60");
-        GridPane gp = formGrid(
-                new Label("Manager ID (auth):"), managerId,
-                new Label("Day:"), day,
-                new Label("Minutes (≥60):"), mins);
-        d.getDialogPane().setContent(gp);
-        d.setResultConverter(btn -> {
-            if (btn!=ButtonType.OK) return null;
-            try { return new Triple<String,DayOfWeek,Integer>(managerId.getText(), day.getValue(), Integer.valueOf(Integer.parseInt(mins.getText().trim()))); }
-            catch (NumberFormatException nfe){ showError("Invalid minutes", "Please enter a number"); return null; }
-        });
-        Optional<Triple<String,DayOfWeek,Integer>> res = d.showAndWait();
-        if (res.isPresent()){
-            Triple<String,DayOfWeek,Integer> t = res.get();
-            try { app.setDoctorMinutes(t.a, t.b, t.c.intValue()); setStatus("Doctor minutes set for " + t.b + " = " + t.c); }
-            catch (Exception ex){ showError("Set minutes failed", ex.getMessage()); }
-        }
-    }
-
-    private void promptAssignShift(){
-        Dialog<Quad<String,String,DayOfWeek,Boolean>> d = new Dialog<Quad<String,String,DayOfWeek,Boolean>>();
-        d.setTitle("Assign Nurse Shift");
-        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        TextField managerId = new TextField("m1");
-        TextField nurseId = new TextField();
-        ComboBox<DayOfWeek> day = new ComboBox<DayOfWeek>();
-        day.getItems().addAll(DayOfWeek.values());
-        day.getSelectionModel().select(DayOfWeek.MONDAY);
-        ComboBox<String> shift = new ComboBox<String>();
-        shift.getItems().addAll("A (08-16)", "B (14-22)");
-        shift.getSelectionModel().select(0);
-        GridPane gp = formGrid(
-                new Label("Manager ID (auth):"), managerId,
-                new Label("Nurse ID:"), nurseId,
-                new Label("Day:"), day,
-                new Label("Shift:"), shift);
-        d.getDialogPane().setContent(gp);
-        d.setResultConverter(btn -> {
-            if (btn!=ButtonType.OK) return null;
-            return new Quad<String,String,DayOfWeek,Boolean>(managerId.getText(), nurseId.getText(), day.getValue(), Boolean.valueOf(shift.getSelectionModel().getSelectedIndex()==0));
-        });
-        Optional<Quad<String,String,DayOfWeek,Boolean>> res = d.showAndWait();
-        if (res.isPresent()){
-            Quad<String,String,DayOfWeek,Boolean> t = res.get();
-            try { app.assignNurseShift(t.a, t.b, t.c, t.d.booleanValue()); setStatus("Shift assigned"); }
-            catch (Exception ex){ showError("Assign shift failed", ex.getMessage()); }
-        }
-    }
-
-    private void promptRemoveShift(){
-        Dialog<Quad<String,String,DayOfWeek,Boolean>> d = new Dialog<Quad<String,String,DayOfWeek,Boolean>>();
-        d.setTitle("Remove Nurse Shift");
-        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        TextField managerId = new TextField("m1");
-        TextField nurseId = new TextField();
-        ComboBox<DayOfWeek> day = new ComboBox<DayOfWeek>();
-        day.getItems().addAll(DayOfWeek.values());
-        day.getSelectionModel().select(DayOfWeek.MONDAY);
-        ComboBox<String> shift = new ComboBox<String>();
-        shift.getItems().addAll("A (08-16)", "B (14-22)");
-        shift.getSelectionModel().select(0);
-        GridPane gp = formGrid(
-                new Label("Manager ID (auth):"), managerId,
-                new Label("Nurse ID:"), nurseId,
-                new Label("Day:"), day,
-                new Label("Shift:"), shift);
-        d.getDialogPane().setContent(gp);
-        d.setResultConverter(btn -> {
-            if (btn!=ButtonType.OK) return null;
-            return new Quad<String,String,DayOfWeek,Boolean>(managerId.getText(), nurseId.getText(), day.getValue(), Boolean.valueOf(shift.getSelectionModel().getSelectedIndex()==0));
-        });
-        Optional<Quad<String,String,DayOfWeek,Boolean>> res = d.showAndWait();
-        if (res.isPresent()){
-            Quad<String,String,DayOfWeek,Boolean> t = res.get();
-            try { app.removeNurseShift(t.a, t.b, t.c, t.d.booleanValue()); setStatus("Shift removed"); }
-            catch (Exception ex){ showError("Remove shift failed", ex.getMessage()); }
-        }
-    }
-
-    private void promptAdmitPatient(){
-    	if (!ensureBedsAvailable("This action")) return;
-        Dialog<AdmitArgs> d = new Dialog<AdmitArgs>();
-        d.setTitle("Admit Patient");
-        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        TextField managerId = new TextField("m1");
-        TextField pid = new TextField();
-        TextField name = new TextField();
-        ComboBox<Gender> gender = new ComboBox<Gender>();
-        gender.getItems().addAll(Gender.values());
-        gender.getSelectionModel().select(Gender.F);
-        CheckBox iso = new CheckBox("Requires isolation");
-        Spinner<Integer> bedIndex = new Spinner<Integer>(0, Math.max(0, app.beds.size()-1), 0);
-        GridPane gp = formGrid(
-                new Label("Manager ID (auth):"), managerId,
-                new Label("Patient ID:"), pid,
-                new Label("Full name:"), name,
-                new Label("Gender:"), gender,
-                new Label("Bed index:"), bedIndex,
-                new Label(""), iso
-        );
-        d.getDialogPane().setContent(gp);
-        d.setResultConverter(btn -> {
-            if (btn!=ButtonType.OK) return null;
-            return new AdmitArgs(managerId.getText(), pid.getText(), name.getText(),
-                    gender.getValue(), iso.isSelected(), bedIndex.getValue());
-        });
-        Optional<AdmitArgs> res = d.showAndWait();
-        if (res.isPresent()){
-            AdmitArgs a = res.get();
-            try{
-                Bed target = app.beds.get(a.bedIdx);
-                if (!target.isVacant()) {
-                    showError("Admit failed", "Bed is already occupied.");
-                    return;
-                }
-                app.admitPatient(a.managerId, new Patient(a.pid, a.name, a.gender, a.iso), target);
-                setStatus("Admitted " + a.pid + " to " + target);
-                refreshBeds();
-            } catch (Exception ex){ showError("Admit failed", ex.getMessage()); }
-        }
-    }
-
-    private void promptMovePatient(){
-    	if (!ensureBedsAvailable("This action")) return;
-        Dialog<MoveArgs> d = new Dialog<MoveArgs>();
-        d.setTitle("Move Patient");
-        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        TextField nurseId = new TextField();
-        ComboBox<DayOfWeek> day = new ComboBox<DayOfWeek>();
-        day.getItems().addAll(DayOfWeek.values());
-        day.getSelectionModel().select(DayOfWeek.MONDAY);
-        Spinner<Integer> fromIdx = new Spinner<Integer>(0, Math.max(0, app.beds.size()-1), 0);
-        Spinner<Integer> toIdx   = new Spinner<Integer>(0, Math.max(0, app.beds.size()-1), 1);
-        Spinner<Integer> hour    = new Spinner<Integer>(0, 23, 10);
-        GridPane gp = formGrid(
-                new Label("Nurse ID (auth):"), nurseId,
-                new Label("Day:"), day,
-                new Label("Hour:"), hour,
-                new Label("From bed index:"), fromIdx,
-                new Label("To bed index:"), toIdx
-        );
-        d.getDialogPane().setContent(gp);
-        d.setResultConverter(btn -> {
-            if (btn!=ButtonType.OK) return null;
-            return new MoveArgs(nurseId.getText(), day.getValue(), hour.getValue(),
-                    fromIdx.getValue(), toIdx.getValue());
-        });
-        Optional<MoveArgs> res = d.showAndWait();
-        if (res.isPresent()){
-            MoveArgs a = res.get();
-            try{
-                Bed from = app.beds.get(a.fromIdx);
-                Bed to   = app.beds.get(a.toIdx);
-                app.movePatient(a.nurseId, from, to, a.day, LocalTime.of(a.hour,0));
-                setStatus("Moved patient from " + from + " to " + to);
-                refreshBeds();
-            } catch (Exception ex){ showError("Move failed", ex.getMessage()); }
-        }
-    }
-
 
     private GridPane formGrid(javafx.scene.Node... nodes){
         GridPane gp = new GridPane();
@@ -577,67 +705,7 @@ public class CareHomeApp extends Application {
     private static final class Triple<A,B,C>{ final A a; final B b; final C c; Triple(A a,B b,C c){this.a=a;this.b=b;this.c=c;} }
     private static final class Quad<A,B,C,D>{ final A a; final B b; final C c; final D d; Quad(A a,B b,C c,D d){this.a=a;this.b=b;this.c=c;this.d=d;} }
 
-    private static final class AdmitArgs {
-        final String managerId, pid, name; final Gender gender; final boolean iso; final int bedIdx;
-        AdmitArgs(String managerId, String pid, String name, Gender gender, boolean iso, int bedIdx){
-            this.managerId=managerId; this.pid=pid; this.name=name; this.gender=gender; this.iso=iso; this.bedIdx=bedIdx;
-        }
-    }
-    private static final class MoveArgs {
-        final String nurseId; final DayOfWeek day; final int hour; final int fromIdx; final int toIdx;
-        MoveArgs(String nurseId, DayOfWeek day, int hour, int fromIdx, int toIdx){
-            this.nurseId=nurseId; this.day=day; this.hour=hour; this.fromIdx=fromIdx; this.toIdx=toIdx;
-        }
-    }
-    
-    private void showRosterDashboard(){
-        TabPane tabs = new TabPane();
-
-        TextArea team = new TextArea(app.teamRosterSummary());
-        team.setEditable(false); team.setWrapText(true);
-        team.setPrefSize(820, 520);
-        Tab t1 = new Tab("Team (Week)", new ScrollPane(team));
-        t1.setClosable(false);
-
-        TextArea byDay = new TextArea(app.nurseWeeklyRosterSummary());
-        byDay.setEditable(false); byDay.setWrapText(true);
-        Tab t2 = new Tab("Nurses by Day", new ScrollPane(byDay));
-        t2.setClosable(false);
-
-        TextArea byPerson = new TextArea(app.allNursesRosterByPerson());
-        byPerson.setEditable(false); byPerson.setWrapText(true);
-        Tab t3 = new Tab("Nurses by Person", new ScrollPane(byPerson));
-        t3.setClosable(false);
-
-        TextArea docs = new TextArea(app.doctorMinutesSummary());
-        docs.setEditable(false); docs.setWrapText(true);
-        Tab t4 = new Tab("Doctor Coverage", new ScrollPane(docs));
-        t4.setClosable(false);
-
-        tabs.getTabs().addAll(t1, t2, t3, t4);
-
-        Dialog<Void> d = new Dialog<>();
-        d.setTitle("Roster Dashboard");
-        d.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
-        d.getDialogPane().setContent(tabs);
-        d.setResizable(true);
-        d.getDialogPane().setPrefSize(880, 600);
-        d.showAndWait();
-
-        setStatus("Roster Dashboard viewed");
-    }
-    
-    private boolean ensureBedsAvailable(String action){
-        if (app.beds.isEmpty()){
-            showError(action, "No beds available yet.");
-            return false;
-        }
-        return true;
-    }
-
-
     public static void main(String[] args) {
         launch(args);
     }
-
 }

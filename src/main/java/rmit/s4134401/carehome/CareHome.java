@@ -511,7 +511,7 @@ public class CareHome implements Serializable {
         for (DayOfWeek d : DayOfWeek.values()){
             int mins = doctorDailyMinutes.getOrDefault(d, 0);
             sb.append(String.format(" %s : %d min %s\n",
-                    d, mins, (mins >= 60 ? "✅" : "⚠️ <60")));
+                    d, mins, (mins >= 60 ? "[OK]" : "[Below 60]")));
         }
         return sb.toString().trim();
     }
@@ -523,7 +523,6 @@ public class CareHome implements Serializable {
         sb.append(nurseWeeklyRosterSummary());
         return sb.toString();
     }
-    
     
     public String allNursesRosterByPerson(){
         StringBuilder sb = new StringBuilder("--- Nurse roster (per person, whole week) ---\n");
@@ -556,12 +555,10 @@ public class CareHome implements Serializable {
         return sb.toString().trim();
     }
 
-
     public static void main(String[] args){
         CareHome app = new CareHome();
         Scanner sc = new Scanner(System.in);
         System.out.println("CareHome — Phase 1 demo. Type number and ENTER.\n");
-        app.addManager("m1","Manager One");
         boolean running = true;
 
         while(running){
