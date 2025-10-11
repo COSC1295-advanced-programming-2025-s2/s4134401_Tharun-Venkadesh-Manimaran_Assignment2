@@ -43,8 +43,6 @@ public class CareHome implements Serializable {
         DayOfWeek[] days = DayOfWeek.values();
         for (int i=0; i<days.length; i++) doctorDailyMinutes.put(days[i], Integer.valueOf(0));
     }
-    
-    
 
     public void addManager(String id, String name){ putStaff(new Manager(id,name)); }
     public void addDoctor (String id, String name){ putStaff(new Doctor (id,name)); }
