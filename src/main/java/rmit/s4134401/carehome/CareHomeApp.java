@@ -19,27 +19,29 @@ import rmit.s4134401.carehome.service.CareHomeService;
 import rmit.s4134401.carehome.repo.jdbc.*;
 
 public class CareHomeApp extends Application {
+	
+	private String currentUserId = null;
+	private Role currentUserRole = null;
+	
+	private static final String DEFAULT_MANAGER_ID = "m1";
+	private static final String DEFAULT_MANAGER_NAME = "Manager One";
+	private static final String DEFAULT_MANAGER_BOOTSTRAP_PASSWORD = "m1";
+
+	private MenuItem miAddDoc, miAddNurse, miSetDocMins, miListStaff, miShowRoster, miStaffAudit, miShowStaff;
+	private MenuItem miAssignShift, miRemoveShift, miCheckCompliance, miNurseWeek, miDoctorWeek, miTeamWeek, miRosterDashboard, miExportRoster;
+	private MenuItem miAdmit, miMove, miDetails, miAddRx, miAdminMed;
 
     private CareHomeService svc;
     private CareHome app = new CareHome();
 
     private final TilePane bedGrid = new TilePane();
     private final Text status = new Text("Ready");
+    
 
     @Override
     public void start(Stage stage) {
-        rmit.s4134401.carehome.util.DB.init("carehome.db"); 
+        rmit.s4134401.carehome.util.DB.init("carehome.db");
         rmit.s4134401.carehome.util.SchemaMigrator.ensure();
-
-        BorderPane root = new BorderPane();
-        root.setTop(buildMenuBar(stage));
-        root.setCenter(buildBedPane());
-        root.setBottom(buildStatusBar());
-
-        Scene scene = new Scene(root, 1000, 650);
-        stage.setTitle("Resident HealthCare System — S2 2025");
-        stage.setScene(scene);
-        stage.show();
 
         svc = new CareHomeService(
                 new JdbcStaffRepository(),
@@ -51,12 +53,143 @@ public class CareHomeApp extends Application {
                 new JdbcPrescriptionRepository(),
                 new JdbcAdministrationRepository()
         );
+        try { svc.addManager(DEFAULT_MANAGER_ID, DEFAULT_MANAGER_NAME); } catch (RuntimeException ignore) {}
+        ensureBootstrapManagerPassword();   
 
-        try { svc.addManager("m1", "Manager One"); } catch (RuntimeException ignore) {}
+        if (!promptLogin()) {
+            Platform.exit();
+            return;
+        }
 
+        BorderPane root = new BorderPane();
+        MenuBar mb = buildMenuBar(stage);
+        root.setTop(mb);
+        root.setCenter(buildBedPane());
+        root.setBottom(buildStatusBar());
+
+        applyRolePermissions();  
+
+        Scene scene = new Scene(root, 1000, 650);
+        stage.setTitle("Resident HealthCare System — S2 2025");
+        stage.setScene(scene);
+        stage.show();
+
+        setStatus("Logged in: " + currentUserId + " (" + currentUserRole + ")");
         refreshBeds();
     }
     
+    private boolean promptLogin(){
+        while (true){
+            Dialog<Credentials> d = new Dialog<>();
+            d.setTitle("Login");
+            d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+
+            TextField tfId = new TextField();
+            tfId.setPromptText("Staff ID (e.g., " + DEFAULT_MANAGER_ID + ", d1, n1)");
+            PasswordField tfPw = new PasswordField();
+            tfPw.setPromptText("Password");
+
+            GridPane gp = formGrid(new Label("Staff ID:"), tfId, new Label("Password:"), tfPw);
+            d.getDialogPane().setContent(gp);
+            d.setResultConverter(btn -> btn==ButtonType.OK ? new Credentials(tfId.getText().trim(), tfPw.getText()) : null);
+
+            java.util.Optional<Credentials> res = d.showAndWait();
+            if (!res.isPresent()) return false;
+
+            String id = res.get().id;
+            String pw = res.get().pw;
+
+            Role role = authenticate(id, pw);
+            if (role == null){
+                showError("Login failed", "Invalid ID or password.");
+                continue;
+            }
+
+            currentUserId = id;
+            currentUserRole = role;
+
+            return true;
+        }
+    }
+
+    private static final class Credentials {
+        final String id; final String pw;
+        Credentials(String i, String p){ id=i; pw=p; }
+    }
+
+    private Role getRoleFor(String id){
+        String sql = "SELECT role FROM staff WHERE id = ? LIMIT 1";
+        try (java.sql.Connection c = rmit.s4134401.carehome.util.DB.get();
+             java.sql.PreparedStatement ps = c.prepareStatement(sql)){
+            ps.setString(1, id.trim());
+            try (java.sql.ResultSet rs = ps.executeQuery()){
+                if (!rs.next()) return null;
+                return Role.valueOf(rs.getString(1));
+            }
+        } catch (Exception e){
+            showError("DB Error", e.getMessage());
+            return null;
+        }
+    }
+    
+    private Role authenticate(String id, String pw){
+        String sql = "SELECT role FROM staff WHERE id=? AND password=? LIMIT 1";
+        try (java.sql.Connection c = rmit.s4134401.carehome.util.DB.get();
+             java.sql.PreparedStatement ps = c.prepareStatement(sql)){
+            ps.setString(1, id.trim());
+            ps.setString(2, pw.trim());
+            try (java.sql.ResultSet rs = ps.executeQuery()){
+                if (!rs.next()) return null;
+                return Role.valueOf(rs.getString("role"));
+            }
+        } catch (Exception e){
+            showError("DB Error", e.getMessage());
+            return null;
+        }
+    }
+    
+    private void ensureBootstrapManagerPassword(){
+        String sql = "UPDATE staff SET password=? WHERE id=? AND (password IS NULL OR TRIM(password)='')";
+        try (java.sql.Connection c = rmit.s4134401.carehome.util.DB.get();
+             java.sql.PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, DEFAULT_MANAGER_BOOTSTRAP_PASSWORD);
+            ps.setString(2, DEFAULT_MANAGER_ID);
+            ps.executeUpdate();
+        } catch (Exception ignore) {}
+    }
+
+    private void applyRolePermissions(){
+        if (currentUserRole == null) return;
+
+        boolean isMgr = currentUserRole == Role.MANAGER;
+        boolean isDoc = currentUserRole == Role.DOCTOR;
+        boolean isNur = currentUserRole == Role.NURSE;
+
+        miAddDoc.setDisable(!isMgr);
+        miAddNurse.setDisable(!isMgr);
+        miSetDocMins.setDisable(!isMgr);
+        miListStaff.setDisable(!isMgr);
+        miShowRoster.setDisable(!isMgr);
+        miStaffAudit.setDisable(!isMgr);
+        miShowStaff.setDisable(!isMgr);
+
+        miAssignShift.setDisable(!isMgr);
+        miRemoveShift.setDisable(!isMgr);
+        miCheckCompliance.setDisable(!isMgr);
+        miNurseWeek.setDisable(!isMgr);
+        miDoctorWeek.setDisable(!isMgr);
+        miTeamWeek.setDisable(!isMgr);
+        miRosterDashboard.setDisable(!isMgr);
+        miExportRoster.setDisable(!isMgr);
+
+        miAdmit.setDisable(!isMgr);
+        miMove.setDisable(!isNur);              
+        miAdminMed.setDisable(!isNur);          
+        miAddRx.setDisable(!isDoc);             
+        miDetails.setDisable(false);            
+    }
+
+
     private void showRosterDashboard(){
         TabPane tabs = new TabPane();
 
@@ -93,7 +226,6 @@ public class CareHomeApp extends Application {
 
         setStatus("Roster Dashboard viewed");
     }
-
     
     private static final class BedCell {
         final int id;              
@@ -144,6 +276,7 @@ public class CareHomeApp extends Application {
     }
 
     private MenuBar buildMenuBar(Stage stage){
+        // ---- FILE ----
         Menu file = new Menu("File");
         MenuItem save = new MenuItem("Save…");
         save.setOnAction(e -> {
@@ -164,16 +297,17 @@ public class CareHomeApp extends Application {
         exit.setOnAction(e -> Platform.exit());
         file.getItems().addAll(save, load, new SeparatorMenuItem(), exit);
 
+        // ---- STAFF ----
         Menu staff = new Menu("Staff");
-        MenuItem addDoc = new MenuItem("Add Doctor");
-        addDoc.setOnAction(e -> promptAddStaff(Role.DOCTOR));
-        MenuItem addNurse = new MenuItem("Add Nurse");
-        addNurse.setOnAction(e -> promptAddStaff(Role.NURSE));
-        MenuItem setDocMins = new MenuItem("Set Doctor Minutes…");
-        setDocMins.setOnAction(e -> promptSetDoctorMinutes());
+        miAddDoc = new MenuItem("Add Doctor");
+        miAddDoc.setOnAction(e -> promptAddStaff(Role.DOCTOR));
+        miAddNurse = new MenuItem("Add Nurse");
+        miAddNurse.setOnAction(e -> promptAddStaff(Role.NURSE));
+        miSetDocMins = new MenuItem("Set Doctor Minutes…");
+        miSetDocMins.setOnAction(e -> promptSetDoctorMinutes());
 
-        MenuItem listStaff = new MenuItem("List Staff (Console)");
-        listStaff.setOnAction(e -> {
+        miListStaff = new MenuItem("List Staff (Console)");
+        miListStaff.setOnAction(e -> {
             try {
                 app.printAllStaff();
                 java.util.Map<Role, Long> counts = app.staffCounts();
@@ -184,8 +318,8 @@ public class CareHomeApp extends Application {
             } catch (Exception ex) { showError("List Staff", ex.getMessage()); }
         });
 
-        MenuItem showRoster = new MenuItem("Show Nurse Roster (by ID)...");
-        showRoster.setOnAction(e -> {
+        miShowRoster = new MenuItem("Show Nurse Roster (by ID)...");
+        miShowRoster.setOnAction(e -> {
             TextInputDialog td = new TextInputDialog();
             td.setTitle("Nurse Roster");
             td.setHeaderText("Enter nurse ID:");
@@ -198,8 +332,8 @@ public class CareHomeApp extends Application {
             });
         });
 
-        MenuItem staffAudit = new MenuItem("Show Staff Audit…");
-        staffAudit.setOnAction(e -> {
+        miStaffAudit = new MenuItem("Show Staff Audit…");
+        miStaffAudit.setOnAction(e -> {
             TextInputDialog td = new TextInputDialog();
             td.setTitle("Staff Audit");
             td.setHeaderText("Enter staff ID:");
@@ -209,47 +343,35 @@ public class CareHomeApp extends Application {
             });
         });
 
-        MenuItem showStaff = new MenuItem("Show Staff…");
-        showStaff.setOnAction(e -> showStaffList());
+        miShowStaff = new MenuItem("Show Staff…");
+        miShowStaff.setOnAction(e -> showStaffList());
 
         staff.getItems().addAll(
-                addDoc, addNurse, new SeparatorMenuItem(), setDocMins,
-                new SeparatorMenuItem(), listStaff, showRoster, staffAudit,
-                new SeparatorMenuItem(), showStaff
+                miAddDoc, miAddNurse, new SeparatorMenuItem(), miSetDocMins,
+                new SeparatorMenuItem(), miListStaff, miShowRoster, miStaffAudit,
+                new SeparatorMenuItem(), miShowStaff
         );
-
+        
         Menu schedule = new Menu("Schedule");
-        MenuItem assignShift = new MenuItem("Assign Nurse Shift…");
-        assignShift.setOnAction(e -> promptAssignShift());
-        MenuItem removeShift = new MenuItem("Remove Nurse Shift…");
-        removeShift.setOnAction(e -> promptRemoveShift());
-        MenuItem checkCompliance = new MenuItem("Check Compliance");
-        checkCompliance.setOnAction(e -> {
+        miAssignShift = new MenuItem("Assign Nurse Shift…");
+        miAssignShift.setOnAction(e -> promptAssignShift());
+        miRemoveShift = new MenuItem("Remove Nurse Shift…");
+        miRemoveShift.setOnAction(e -> promptRemoveShift());
+        miCheckCompliance = new MenuItem("Check Compliance");
+        miCheckCompliance.setOnAction(e -> {
             try { svc.checkCompliance(); info("Compliance", "All good"); setStatus("Compliance OK"); }
             catch (Exception ex){ showError("Compliance failure", ex.getMessage()); }
         });
-        MenuItem nurseWeek = new MenuItem("Nurse Roster — Whole Week");
-        nurseWeek.setOnAction(e -> {
-            String txt = app.nurseWeeklyRosterSummary();
-            showLongInfo("Nurse Roster — Week", txt);
-            setStatus("Nurse roster (week) shown");
-        });
-        MenuItem doctorWeek = new MenuItem("Doctor Coverage — Week");
-        doctorWeek.setOnAction(e -> {
-            String txt = app.doctorMinutesSummary();
-            showLongInfo("Doctor Coverage — Week", txt);
-            setStatus("Doctor coverage (week) shown");
-        });
-        MenuItem teamWeek = new MenuItem("Team Roster — Week");
-        teamWeek.setOnAction(e -> {
-            String txt = app.teamRosterSummary();
-            showLongInfo("Team Roster — Week", txt);
-            setStatus("Team roster (week) shown");
-        });
-        MenuItem rosterDashboard = new MenuItem("Roster Dashboard…");
-        rosterDashboard.setOnAction(e -> showRosterDashboard());
-        MenuItem exportRoster = new MenuItem("Export Week to roster_week.txt");
-        exportRoster.setOnAction(e -> {
+        miNurseWeek = new MenuItem("Nurse Roster — Whole Week");
+        miNurseWeek.setOnAction(e -> showLongInfo("Nurse Roster — Week", app.nurseWeeklyRosterSummary()));
+        miDoctorWeek = new MenuItem("Doctor Coverage — Week");
+        miDoctorWeek.setOnAction(e -> showLongInfo("Doctor Coverage — Week", app.doctorMinutesSummary()));
+        miTeamWeek = new MenuItem("Team Roster — Week");
+        miTeamWeek.setOnAction(e -> showLongInfo("Team Roster — Week", app.teamRosterSummary()));
+        miRosterDashboard = new MenuItem("Roster Dashboard…");
+        miRosterDashboard.setOnAction(e -> showRosterDashboard());
+        miExportRoster = new MenuItem("Export Week to roster_week.txt");
+        miExportRoster.setOnAction(e -> {
             try {
                 String text = app.teamRosterSummary() + "\n\n" + app.allNursesRosterByPerson();
                 java.nio.file.Files.write(java.nio.file.Paths.get("roster_week.txt"),
@@ -259,35 +381,122 @@ public class CareHomeApp extends Application {
             } catch (Exception ex) { showError("Export failed", ex.getMessage()); }
         });
         schedule.getItems().setAll(
-                assignShift, removeShift, new SeparatorMenuItem(),
-                nurseWeek, doctorWeek, teamWeek, rosterDashboard, exportRoster,
-                new SeparatorMenuItem(), checkCompliance
+                miAssignShift, miRemoveShift, new SeparatorMenuItem(),
+                miNurseWeek, miDoctorWeek, miTeamWeek, miRosterDashboard, miExportRoster,
+                new SeparatorMenuItem(), miCheckCompliance
         );
 
         Menu patients = new Menu("Patients");
-        MenuItem admit = new MenuItem("Admit…"); admit.setOnAction(e -> promptAdmitPatient());
-        MenuItem move = new MenuItem("Move…");  move.setOnAction(e -> promptMovePatient());
-        MenuItem details = new MenuItem("Resident Details…"); details.setOnAction(e -> promptResidentDetails());
-        MenuItem addRx = new MenuItem("Add Prescription…"); addRx.setOnAction(e -> promptAddPrescription());
-        MenuItem adminMed = new MenuItem("Administer Medication…"); adminMed.setOnAction(e -> promptAdministerMedication());
-        patients.getItems().addAll(admit, move, new SeparatorMenuItem(), details, addRx, adminMed);
+        miAdmit = new MenuItem("Admit…");        miAdmit.setOnAction(e -> promptAdmitPatient());
+        miMove  = new MenuItem("Move…");         miMove.setOnAction(e -> promptMovePatient());
+        miDetails = new MenuItem("Resident Details…"); miDetails.setOnAction(e -> promptResidentDetails());
+        miAddRx = new MenuItem("Add Prescription…");   miAddRx.setOnAction(e -> promptAddPrescription());
+        miAdminMed = new MenuItem("Administer Medication…"); miAdminMed.setOnAction(e -> promptAdministerMedication());
+        patients.getItems().addAll(miAdmit, miMove, new SeparatorMenuItem(), miDetails, miAddRx, miAdminMed);
 
         Menu audit = new Menu("Audit");
         MenuItem showAudit = new MenuItem("Show Audit in Console");
         showAudit.setOnAction(e -> app.printAudit());
         audit.getItems().add(showAudit);
+        
+        MenuItem miChangePw = new MenuItem("Change My Password...");
+        miChangePw.setOnAction(e -> promptChangePassword());
+        staff.getItems().add(new SeparatorMenuItem());
+        staff.getItems().add(miChangePw);
+        
+        MenuItem miResetPw = new MenuItem("Reset Another User’s Password…");
+        miResetPw.setOnAction(e -> promptResetUserPassword());
+        staff.getItems().add(miResetPw);
 
         return new MenuBar(file, staff, schedule, patients, audit);
     }
     
+    private void promptResetUserPassword(){
+        if (currentUserRole != Role.MANAGER) { showError("Access denied", "Managers only."); return; }
+
+        Dialog<Triple<String,String,String>> d = new Dialog<>();
+        d.setTitle("Reset User Password");
+        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+
+        TextField targetId = new TextField();
+        PasswordField pw1 = new PasswordField();
+        PasswordField pw2 = new PasswordField();
+        targetId.setPromptText("User ID (e.g., n1, d2)");
+        pw1.setPromptText("New password");
+        pw2.setPromptText("Re-enter new password");
+
+        GridPane gp = formGrid(
+            new Label("User ID:"), targetId,
+            new Label("New password:"), pw1,
+            new Label("Re-enter:"), pw2
+        );
+        d.getDialogPane().setContent(gp);
+        d.setResultConverter(btn -> btn==ButtonType.OK ? new Triple<>(targetId.getText().trim(), pw1.getText(), pw2.getText()) : null);
+
+        d.showAndWait().ifPresent(t -> {
+            if (!t.b.equals(t.c)) { showError("Reset Password", "Passwords do not match."); return; }
+            if (t.a.isEmpty()) { showError("Reset Password", "User ID required."); return; }
+            try (java.sql.Connection c = rmit.s4134401.carehome.util.DB.get();
+                 java.sql.PreparedStatement ps = c.prepareStatement("UPDATE staff SET password=? WHERE id=?")) {
+                ps.setString(1, t.b.trim());
+                ps.setString(2, t.a.trim());
+                int rows = ps.executeUpdate();
+                if (rows == 0) { showError("Reset Password", "No such user: " + t.a); return; }
+                info("Reset Password", "Password updated for " + t.a);
+            } catch (Exception ex) {
+                showError("Reset Password", ex.getMessage());
+            }
+        });
+    }
+
     
+    private void promptChangePassword(){
+        Dialog<Triple<String,String,String>> d = new Dialog<>();
+        d.setTitle("Change Password");
+        d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+
+        PasswordField oldPw = new PasswordField();
+        PasswordField newPw1 = new PasswordField();
+        PasswordField newPw2 = new PasswordField();
+        oldPw.setPromptText("Current password");
+        newPw1.setPromptText("New password");
+        newPw2.setPromptText("Re-enter new password");
+
+        GridPane gp = formGrid(
+                new Label("Old password:"), oldPw,
+                new Label("New password:"), newPw1,
+                new Label("Re-enter new password:"), newPw2
+        );
+        d.getDialogPane().setContent(gp);
+        d.setResultConverter(btn -> btn==ButtonType.OK ? new Triple<>(oldPw.getText(), newPw1.getText(), newPw2.getText()) : null);
+
+        d.showAndWait().ifPresent(t -> {
+            if (t == null) return;
+            if (!t.b.equals(t.c)) { showError("Change Password", "New passwords do not match."); return; }
+
+            String sql = "UPDATE staff SET password=? WHERE id=? AND password=?";
+            try (java.sql.Connection c = rmit.s4134401.carehome.util.DB.get();
+                 java.sql.PreparedStatement ps = c.prepareStatement(sql)){
+                ps.setString(1, t.b.trim());
+                ps.setString(2, currentUserId.trim());
+                ps.setString(3, t.a.trim());
+                int rows = ps.executeUpdate();
+                if (rows == 0) { showError("Change Password", "Current password is incorrect."); return; }
+                info("Change Password", "Password updated successfully!");
+            } catch (Exception ex){
+                showError("Change Password", ex.getMessage());
+            }
+        });
+    }
+
     
     private void promptAdmitPatient(){
         Dialog<Boolean> d = new Dialog<>();
         d.setTitle("Admit Patient");
         d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
 
-        TextField managerId = new TextField("m1");
+        TextField managerId = new TextField(currentUserId);
+        managerId.setEditable(false);
         TextField pid = new TextField();
         TextField name = new TextField();
         ComboBox<Gender> gender = new ComboBox<>();
@@ -301,7 +510,7 @@ public class CareHomeApp extends Application {
         Spinner<Integer> bed  = new Spinner<>(1, 4, 1);
 
         GridPane gp = formGrid(
-                new Label("Manager ID (auth):"), managerId,
+                new Label("Manager ID:"), managerId,
                 new Label("Patient ID:"), pid,
                 new Label("Full name:"), name,
                 new Label("Gender:"), gender,
@@ -508,23 +717,44 @@ public class CareHomeApp extends Application {
     }
 
     private void promptAddStaff(Role role){
-        Dialog<Triple<String,String,String>> d = new Dialog<>();
+        Dialog<Quad<String,String,String,String>> d = new Dialog<>();
         d.setTitle("Add " + role);
         d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        TextField managerId = new TextField("m1");
+
+        TextField managerId = new TextField(currentUserId);
+        managerId.setEditable(false);
         TextField id = new TextField();
         TextField name = new TextField();
+        PasswordField pw = new PasswordField();
+        pw.setPromptText("Initial password");
+
         GridPane gp = formGrid(
                 new Label("Manager ID (auth):"), managerId,
                 new Label(role == Role.DOCTOR ? "Doctor ID:" : "Nurse ID:"), id,
-                new Label("Name:"), name);
+                new Label("Name:"), name,
+                new Label("Password:"), pw
+        );
         d.getDialogPane().setContent(gp);
-        d.setResultConverter(btn -> btn==ButtonType.OK ? new Triple<>(managerId.getText(), id.getText(), name.getText()) : null);
+        d.setResultConverter(btn -> btn==ButtonType.OK ? new Quad<>(managerId.getText(), id.getText(), name.getText(), pw.getText()) : null);
+
         d.showAndWait().ifPresent(t -> {
             try {
-                if (role==Role.DOCTOR) svc.addDoctor(t.b, t.c);
-                else svc.addNurse(t.b, t.c);
-                setStatus(role + " added: " + t.b);
+                if (t.d.trim().isEmpty()) { showError("Add Staff", "Password cannot be empty."); return; }
+                if (role==Role.DOCTOR) {
+                    svc.addDoctor(t.b, t.c);
+                    app.addDoctor(t.b, t.c);
+                } else {
+                    svc.addNurse(t.b, t.c);
+                    app.addNurse(t.b, t.c);
+                }
+                // set password in DB
+                try (java.sql.Connection c = rmit.s4134401.carehome.util.DB.get();
+                     java.sql.PreparedStatement ps = c.prepareStatement("UPDATE staff SET password=? WHERE id=?")) {
+                    ps.setString(1, t.d.trim());
+                    ps.setString(2, t.b.trim());
+                    ps.executeUpdate();
+                }
+                setStatus(role + " added: " + t.b + " (password set)");
             } catch (Exception ex){ showError("Add " + role + " failed", ex.getMessage()); }
         });
     }
@@ -533,7 +763,8 @@ public class CareHomeApp extends Application {
         Dialog<Triple<String,DayOfWeek,Integer>> d = new Dialog<>();
         d.setTitle("Set Doctor Minutes");
         d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        TextField managerId = new TextField("m1");
+        TextField managerId = new TextField(currentUserId);
+        managerId.setEditable(false);
         ComboBox<DayOfWeek> day = new ComboBox<>(); day.getItems().addAll(DayOfWeek.values()); day.getSelectionModel().select(DayOfWeek.MONDAY);
         TextField mins = new TextField("60");
         GridPane gp = formGrid(new Label("Manager ID (auth):"), managerId, new Label("Day:"), day, new Label("Minutes (≥60):"), mins);
@@ -544,8 +775,11 @@ public class CareHomeApp extends Application {
             catch (NumberFormatException nfe){ showError("Invalid minutes", "Please enter a number"); return null; }
         });
         d.showAndWait().ifPresent(t -> {
-            try { svc.setDoctorMinutes(t.a, t.b, t.c); setStatus("Doctor minutes set for " + t.b + " = " + t.c); }
-            catch (Exception ex){ showError("Set minutes failed", ex.getMessage()); }
+            try {
+                svc.setDoctorMinutes(t.a, t.b, t.c);
+                app.setDoctorMinutes(t.a, t.b, t.c);    
+                setStatus("Doctor minutes set for " + t.b + " = " + t.c);
+            } catch (Exception ex){ showError("Set minutes failed", ex.getMessage()); }
         });
     }
 
@@ -553,7 +787,8 @@ public class CareHomeApp extends Application {
         Dialog<Quad<String,String,DayOfWeek,Boolean>> d = new Dialog<>();
         d.setTitle("Assign Nurse Shift");
         d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        TextField managerId = new TextField("m1");
+        TextField managerId = new TextField(currentUserId);
+        managerId.setEditable(false);
         TextField nurseId = new TextField();
         ComboBox<DayOfWeek> day = new ComboBox<>(); day.getItems().addAll(DayOfWeek.values()); day.getSelectionModel().select(DayOfWeek.MONDAY);
         ComboBox<String> shift = new ComboBox<>(); shift.getItems().addAll("A (08-16)", "B (14-22)"); shift.getSelectionModel().select(0);
@@ -564,6 +799,7 @@ public class CareHomeApp extends Application {
             try {
                 if (!nurseExists(t.b)) { showError("Assign shift failed", "Nurse '"+t.b+"' does not exist."); return; }
                 svc.assignNurseShift(t.a, t.b, t.c, t.d);
+                app.assignNurseShift(t.a, t.b, t.c, t.d);    
                 setStatus("Shift assigned");
             } catch (Exception ex){ showError("Assign shift failed", ex.getMessage()); }
         });
@@ -573,7 +809,8 @@ public class CareHomeApp extends Application {
         Dialog<Quad<String,String,DayOfWeek,Boolean>> d = new Dialog<>();
         d.setTitle("Remove Nurse Shift");
         d.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-        TextField managerId = new TextField("m1");
+        TextField managerId = new TextField(currentUserId);
+        managerId.setEditable(false);
         TextField nurseId = new TextField();
         ComboBox<DayOfWeek> day = new ComboBox<>(); day.getItems().addAll(DayOfWeek.values()); day.getSelectionModel().select(DayOfWeek.MONDAY);
         ComboBox<String> shift = new ComboBox<>(); shift.getItems().addAll("A (08-16)", "B (14-22)"); shift.getSelectionModel().select(0);
@@ -581,8 +818,11 @@ public class CareHomeApp extends Application {
         d.getDialogPane().setContent(gp);
         d.setResultConverter(btn -> btn==ButtonType.OK ? new Quad<>(managerId.getText(), nurseId.getText(), day.getValue(), shift.getSelectionModel().getSelectedIndex()==0) : null);
         d.showAndWait().ifPresent(t -> {
-            try { svc.removeNurseShift(t.a, t.b, t.c, t.d); setStatus("Shift removed"); }
-            catch (Exception ex){ showError("Remove shift failed", ex.getMessage()); }
+            try {
+                svc.removeNurseShift(t.a, t.b, t.c, t.d);
+                app.removeNurseShift(t.a, t.b, t.c, t.d);    
+                setStatus("Shift removed");
+            } catch (Exception ex){ showError("Remove shift failed", ex.getMessage()); }
         });
     }
 
@@ -656,7 +896,6 @@ public class CareHomeApp extends Application {
         String body = lines.isEmpty() ? "(no staff)" : String.join("\n", lines);
         showLongInfo("Staff (role  id  name)", body);
     }
-
 
     private void onBedClickedDB(BedCell b){
         if (b.isVacant()) info("Bed", b.ward + "-R" + b.room + "-B" + b.bedNum + "\n[vacant]");
