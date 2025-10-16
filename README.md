@@ -60,36 +60,5 @@ The app automatically patches the audit table if an older database is opened.
 
 ---
 
-## **Files Created at Runtime**
-
-- `carehome.db` — SQLite database file.  
-- `audit_latest.txt` — Exported audit (from *File → Export Logs…*).  
-- `roster_week.txt` — Weekly roster summary (from *Schedule → Export Week…*).  
-- `archive/` — Folder containing discharge archive text files.  
-- `patients_snapshot.json` — Snapshot for restore/import of current patient data.
-
----
-
-## **Troubleshooting**
-
-- **Export Logs shows “no such column: ts” or “no such column: action”**  
-You opened an old database. Launch the app once to let it patch automatically, then export again.  
-If you don’t need the old data, delete `carehome.db` and relaunch.
-
-- **Nurse cannot administer or move patients**  
-The nurse must be rostered and on shift at that specific time.
-
-- **Doctor cannot add prescriptions**  
-Ensure that doctor has ≥ 60 minutes of coverage for that day.
-
----
-
-## **Running Tests**
-
-Unit tests are written with **JUnit 5** and run without JavaFX.  
-They use a temporary SQLite database and the real JDBC repositories to validate the business rules in `CareHomeService`.
-
-**Run tests (Maven):**
-
 
 
