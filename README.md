@@ -61,4 +61,6 @@ The app automatically patches the audit table if an older database is opened.
 ---
 
 
+Github repo link:   https://github.com/COSC1295-advanced-programming-2025-s2/s4134401_Tharun-Venkadesh-Manimaran_Assignment2.git
+
 
