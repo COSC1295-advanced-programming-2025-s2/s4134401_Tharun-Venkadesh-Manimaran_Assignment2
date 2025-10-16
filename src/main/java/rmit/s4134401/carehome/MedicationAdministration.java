@@ -39,7 +39,7 @@ public class MedicationAdministration implements Serializable {
 
     @Override
     public String toString() {
-        return "ADMIN[" + patientId + "] " + medicine + " " + dose +
+        return "[" + patientId + "] " + medicine + " " + dose +
                " on " + day + " " + time + " by " + staffId;
     }
 }

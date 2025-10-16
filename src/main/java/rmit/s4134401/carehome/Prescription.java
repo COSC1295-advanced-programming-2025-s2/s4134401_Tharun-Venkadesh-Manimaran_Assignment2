@@ -36,7 +36,7 @@ public class Prescription implements Serializable {
     public List<Line> getLines(){ return lines; }
 
     @Override public String toString(){
-        String s = "RX[" + patientId + "]: ";
+        String s = "[" + patientId + "]: ";
         for (int i=0;i<lines.size();i++){
             s += lines.get(i).toString();
             if (i<lines.size()-1) s += "; ";

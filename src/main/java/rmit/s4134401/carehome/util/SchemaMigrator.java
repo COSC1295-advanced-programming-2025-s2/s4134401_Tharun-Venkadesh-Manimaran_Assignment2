@@ -41,18 +41,43 @@ public final class SchemaMigrator {
             s.execute("CREATE TABLE IF NOT EXISTS administrations(" +
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id TEXT NOT NULL, medicine TEXT NOT NULL, dose TEXT NOT NULL," +
                     "day TEXT NOT NULL, time TEXT NOT NULL, staff_id TEXT NOT NULL, is_correction INTEGER NOT NULL DEFAULT 0)");
-
+            
+            s.execute("""
+            	    CREATE TABLE IF NOT EXISTS doctor_minutes_v2(
+            	        doctor_id TEXT,                 -- allow NULL for old rows
+            	        day       TEXT NOT NULL,
+            	        minutes   INTEGER NOT NULL,
+            	        PRIMARY KEY(doctor_id, day)
+            	    )
+            	""");
+            
             s.execute("INSERT OR IGNORE INTO beds(id,ward,room,bed_num) " +
                     "SELECT NULL,'A',r,b FROM (SELECT 1 r UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6)," +
                     "(SELECT 1 b UNION SELECT 2 UNION SELECT 3 UNION SELECT 4) WHERE (r IN (1,2) AND b<=1) OR (r IN (3,4) AND b<=2) OR (r=5 AND b<=3) OR (r=6)");
             s.execute("INSERT OR IGNORE INTO beds(id,ward,room,bed_num) " +
                     "SELECT NULL,'B',r,b FROM (SELECT 1 r UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6)," +
                     "(SELECT 1 b UNION SELECT 2 UNION SELECT 3 UNION SELECT 4) WHERE (r IN (1,2) AND b<=1) OR (r IN (3,4) AND b<=2) OR (r=5 AND b<=3) OR (r=6)");
-
+            
+            
+            s.execute("""
+            	    INSERT OR IGNORE INTO doctor_minutes_v2(doctor_id, day, minutes)
+            	    SELECT NULL, day, minutes FROM doctor_minutes
+            	""");
+            
+            s.execute("DROP TABLE IF EXISTS doctor_minutes");
+            s.execute("ALTER TABLE doctor_minutes_v2 RENAME TO doctor_minutes");
+            
             s.close();
             c.close();
         } catch (Exception e){
             throw new RuntimeException("Schema ensure failed: " + e.getMessage(), e);
         }
+        
+        try (java.sql.Connection c = rmit.s4134401.carehome.util.DB.get();
+        	     java.sql.Statement st = c.createStatement()) {
+        	    st.executeUpdate(
+        	        "DELETE FROM doctor_minutes WHERE doctor_id IS NULL OR TRIM(doctor_id)=''");
+        	} catch (Exception ignore) {}
+
     }
 }
